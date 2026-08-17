@@ -5,3 +5,5 @@ result-*
 bin/
 *.test
 coverage.out
+
+data/

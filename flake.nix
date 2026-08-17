@@ -27,8 +27,17 @@
         };
 
         packages = rec {
-          app = pkgs.callPackage ./package.nix { };
-          default = app;
+          agent-up = pkgs.callPackage ./package.nix {
+            pname = "agent-up";
+            subPackage = "cmd/agent-up";
+          };
+          agent-up-server = pkgs.callPackage ./package.nix {
+            pname = "agent-up-server";
+            subPackage = "cmd/agent-up-server";
+          };
+          client = agent-up;
+          server = agent-up-server;
+          default = agent-up;
         };
       }
     );
