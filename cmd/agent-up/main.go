@@ -74,13 +74,11 @@ func run(args []string, getenv func(string) string, stdin io.Reader, stdout io.W
 			if openErr != nil {
 				return fmt.Errorf("cannot open upload file %q: %w", options.path, openErr)
 			}
+			defer func() { _ = file.Close() }()
+
 			result, err = uploader.UploadFile(filepath.Base(options.path), options.mime, file)
-			closeErr := file.Close()
 			if err != nil {
 				return fmt.Errorf("failed to upload file %q: %w", options.path, err)
-			}
-			if closeErr != nil {
-				return fmt.Errorf("failed to close upload file %q: %w", options.path, closeErr)
 			}
 		} else {
 			return fmt.Errorf("upload path %q is not a regular file or directory", options.path)

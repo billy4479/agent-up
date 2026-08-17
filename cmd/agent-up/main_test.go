@@ -99,6 +99,21 @@ func TestRunUploadsDirectory(t *testing.T) {
 	}
 }
 
+func TestRunUploadsFileWithoutDoubleClose(t *testing.T) {
+	host := newTestServer(t)
+	filename := filepath.Join(t.TempDir(), "README.md")
+	if err := os.WriteFile(filename, []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if err := run([]string{filename}, func(string) string { return host.URL }, strings.NewReader(""), &stdout, host.Client()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(stdout.String()), "/README.md") {
+		t.Fatalf("unexpected URL: %q", stdout.String())
+	}
+}
+
 func TestRunRequiresEnvironmentAndStdinName(t *testing.T) {
 	if err := run([]string{"-", "--name", "file"}, func(string) string { return "" }, strings.NewReader(""), &bytes.Buffer{}, nil); err == nil || err.Error() != "AGENTUP_URL is not set; set it to the agent-up server URL" {
 		t.Fatalf("unexpected environment error: %v", err)

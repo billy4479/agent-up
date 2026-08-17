@@ -144,3 +144,32 @@ func TestIndexURLDoesNotIncludeFilename(t *testing.T) {
 		t.Fatalf("URL = %q", publicURL)
 	}
 }
+
+func TestUploadFileDoesNotCloseReader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"slug":"abcdefgh"}`))
+	}))
+	defer server.Close()
+	client, err := New(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := &trackingReadCloser{Reader: strings.NewReader("content")}
+	if _, err := client.UploadFile("file.txt", "", body); err != nil {
+		t.Fatal(err)
+	}
+	if body.closed {
+		t.Fatal("UploadFile closed a caller-owned reader")
+	}
+}
+
+type trackingReadCloser struct {
+	io.Reader
+	closed bool
+}
+
+func (r *trackingReadCloser) Close() error {
+	r.closed = true
+	return nil
+}

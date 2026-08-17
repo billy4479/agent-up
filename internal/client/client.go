@@ -48,7 +48,8 @@ func New(rawURL string, httpClient *http.Client) (*Client, error) {
 }
 
 func (c *Client) UploadFile(name, mimeType string, body io.Reader) (string, error) {
-	slug, err := c.upload("file", name, mimeType, body)
+	// Keep ownership with the caller even when body also implements io.Closer.
+	slug, err := c.upload("file", name, mimeType, struct{ io.Reader }{body})
 	if err != nil {
 		return "", err
 	}
