@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	internalserver "github.com/billy4479/agent-up/internal/server"
 )
@@ -163,7 +164,7 @@ func TestRunRejectsSymlink(t *testing.T) {
 
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	service, err := internalserver.New(t.TempDir(), 0)
+	service, err := internalserver.New(t.TempDir(), 0, 24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

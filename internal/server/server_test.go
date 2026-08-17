@@ -13,10 +13,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFileUploads(t *testing.T) {
-	service, err := New(t.TempDir(), 0)
+	service, err := New(t.TempDir(), 0, 24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +55,7 @@ func TestFileUploads(t *testing.T) {
 }
 
 func TestDirectoryBrowsing(t *testing.T) {
-	service, err := New(t.TempDir(), 0)
+	service, err := New(t.TempDir(), 0, 24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +118,7 @@ func TestDirectoryBrowsing(t *testing.T) {
 
 func TestInvalidArchivesAreNotPublished(t *testing.T) {
 	dataDir := t.TempDir()
-	service, err := New(dataDir, 0)
+	service, err := New(dataDir, 0, 24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +147,7 @@ func TestInvalidArchivesAreNotPublished(t *testing.T) {
 
 func TestInterruptedFileUploadIsNotPublished(t *testing.T) {
 	dataDir := t.TempDir()
-	service, err := New(dataDir, 0)
+	service, err := New(dataDir, 0, 24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +172,7 @@ func TestMaximumUploadSize(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dataDir := t.TempDir()
-			service, err := New(dataDir, test.limit)
+			service, err := New(dataDir, test.limit, 24*time.Hour)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -183,6 +184,98 @@ func TestMaximumUploadSize(t *testing.T) {
 			}
 			assertDataDirEmpty(t, dataDir)
 		})
+	}
+}
+
+func TestUploadsExpire(t *testing.T) {
+	dataDir := t.TempDir()
+	service, err := New(dataDir, 0, 2*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := httptest.NewServer(service.Handler())
+	defer host.Close()
+
+	createdAt := time.Now()
+	slug := upload(t, host.URL, "file", "report.txt", "text/plain", strings.NewReader("report"))
+	manifestPath := filepath.Join(dataDir, slug, "manifest.json")
+	m, err := readManifest(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.ExpiresAt == nil || m.ExpiresAt.Before(createdAt.Add(2*time.Hour)) || m.ExpiresAt.After(time.Now().Add(2*time.Hour)) {
+		t.Fatalf("expires_at = %v, want approximately two hours after creation", m.ExpiresAt)
+	}
+
+	response, err := http.Get(host.URL + "/" + slug + "/report.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	assertStatus(t, response, http.StatusOK)
+	if got := response.Header.Get("Cache-Control"); !strings.HasPrefix(got, "public, max-age=") || !strings.HasSuffix(got, ", must-revalidate") {
+		t.Fatalf("Cache-Control = %q", got)
+	}
+	if got := response.Header.Get("Expires"); got == "" {
+		t.Fatal("Expires header is empty")
+	}
+
+	expiredAt := time.Now().Add(-time.Minute)
+	m.ExpiresAt = &expiredAt
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	response, err = http.Get(host.URL + "/" + slug + "/report.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	assertStatus(t, response, http.StatusNotFound)
+	if _, err := os.Stat(filepath.Join(dataDir, slug)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired upload still exists: %v", err)
+	}
+}
+
+func TestCleanupExpiredLegacyUploads(t *testing.T) {
+	dataDir := t.TempDir()
+	service, err := New(dataDir, 0, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldSlug := "AAAAAAAA"
+	newSlug := "BBBBBBBB"
+	writeLegacyUpload(t, dataDir, oldSlug)
+	writeLegacyUpload(t, dataDir, newSlug)
+	oldTime := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(filepath.Join(dataDir, oldSlug), oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	staging := filepath.Join(dataDir, ".upload-in-progress")
+	if err := os.Mkdir(staging, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.CleanupExpired(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, oldSlug)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired legacy upload still exists: %v", err)
+	}
+	for _, path := range []string{filepath.Join(dataDir, newSlug), staging} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("unexpired or staging directory was removed: %v", err)
+		}
+	}
+}
+
+func TestNewRejectsInvalidUploadTTL(t *testing.T) {
+	if _, err := New(t.TempDir(), 0, 0); err == nil {
+		t.Fatal("New accepted a zero upload TTL")
 	}
 }
 
@@ -275,6 +368,21 @@ func assertDataDirEmpty(t *testing.T, directory string) {
 	}
 	if _, err := os.Stat(filepath.Join(directory, "..", "outside")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("outside file exists or stat failed: %v", err)
+	}
+}
+
+func writeLegacyUpload(t *testing.T, dataDir, slug string) {
+	t.Helper()
+	uploadDir := filepath.Join(dataDir, slug)
+	if err := os.Mkdir(uploadDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(manifest{Kind: "file", Filename: "file.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(uploadDir, "manifest.json"), data, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

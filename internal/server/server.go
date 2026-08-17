@@ -16,20 +16,24 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	internalarchive "github.com/billy4479/agent-up/internal/archive"
 )
 
 type manifest struct {
-	Kind     string `json:"kind"`
-	Filename string `json:"filename,omitempty"`
-	MIME     string `json:"mime,omitempty"`
+	Kind      string     `json:"kind"`
+	Filename  string     `json:"filename,omitempty"`
+	MIME      string     `json:"mime,omitempty"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
 type Server struct {
 	dataDir       string
 	maxUploadSize int64
+	uploadTTL     time.Duration
 }
 
 type listingEntry struct {
@@ -42,14 +46,17 @@ var listingTemplate = template.Must(template.New("listing").Parse(`<!doctype htm
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Index of {{.Path}}</title></head>
 <body><h1>Index of {{.Path}}</h1><ul>{{if .Parent}}<li><a href="../">../</a></li>{{end}}{{range .Entries}}<li><a href="{{.Href}}">{{.Name}}{{if .Dir}}/{{end}}</a></li>{{end}}</ul></body></html>`))
 
-func New(dataDir string, maxUploadSize int64) (*Server, error) {
+func New(dataDir string, maxUploadSize int64, uploadTTL time.Duration) (*Server, error) {
 	if maxUploadSize < 0 {
 		return nil, fmt.Errorf("maximum upload size cannot be negative")
+	}
+	if uploadTTL <= 0 {
+		return nil, fmt.Errorf("upload TTL must be positive")
 	}
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create data directory: %w", err)
 	}
-	return &Server{dataDir: dataDir, maxUploadSize: maxUploadSize}, nil
+	return &Server{dataDir: dataDir, maxUploadSize: maxUploadSize, uploadTTL: uploadTTL}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -120,6 +127,8 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	expiresAt := time.Now().Add(s.uploadTTL)
+	m.ExpiresAt = &expiresAt
 	manifestData, err := json.Marshal(m)
 	if err == nil {
 		err = os.WriteFile(filepath.Join(staging, "manifest.json"), manifestData, 0o644)
@@ -174,11 +183,23 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slug := parts[0]
-	m, err := readManifest(filepath.Join(s.dataDir, slug, "manifest.json"))
+	uploadDir := filepath.Join(s.dataDir, slug)
+	m, err := readManifest(filepath.Join(uploadDir, "manifest.json"))
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
+	expiresAt, err := s.expiration(uploadDir, m)
+	if err != nil || !time.Now().Before(expiresAt) {
+		if err == nil {
+			_ = os.RemoveAll(uploadDir)
+		}
+		http.NotFound(w, r)
+		return
+	}
+	maxAge := max(int64(time.Until(expiresAt)/time.Second), 0)
+	w.Header().Set("Cache-Control", "public, max-age="+strconv.FormatInt(maxAge, 10)+", must-revalidate")
+	w.Header().Set("Expires", expiresAt.UTC().Format(http.TimeFormat))
 	remainder := ""
 	if len(parts) == 2 {
 		remainder = parts[1]
@@ -192,6 +213,49 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.serveDirectory(w, r, slug, remainder)
+}
+
+// CleanupExpired removes published uploads whose lifetime has elapsed.
+func (s *Server) CleanupExpired() error {
+	entries, err := os.ReadDir(s.dataDir)
+	if err != nil {
+		return fmt.Errorf("read data directory: %w", err)
+	}
+	now := time.Now()
+	var cleanupErrors []error
+	for _, entry := range entries {
+		if !entry.IsDir() || !validSlug(entry.Name()) {
+			continue
+		}
+		uploadDir := filepath.Join(s.dataDir, entry.Name())
+		m, err := readManifest(filepath.Join(uploadDir, "manifest.json"))
+		if err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("read upload %s: %w", entry.Name(), err))
+			continue
+		}
+		expiresAt, err := s.expiration(uploadDir, m)
+		if err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("inspect upload %s: %w", entry.Name(), err))
+			continue
+		}
+		if !now.Before(expiresAt) {
+			if err := os.RemoveAll(uploadDir); err != nil {
+				cleanupErrors = append(cleanupErrors, fmt.Errorf("remove upload %s: %w", entry.Name(), err))
+			}
+		}
+	}
+	return errors.Join(cleanupErrors...)
+}
+
+func (s *Server) expiration(uploadDir string, m manifest) (time.Time, error) {
+	if m.ExpiresAt != nil {
+		return *m.ExpiresAt, nil
+	}
+	info, err := os.Stat(uploadDir)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return info.ModTime().Add(s.uploadTTL), nil
 }
 
 func (s *Server) serveSingleFile(w http.ResponseWriter, r *http.Request, slug, remainder string, m manifest) {
