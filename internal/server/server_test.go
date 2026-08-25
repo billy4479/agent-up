@@ -213,16 +213,43 @@ func TestUploadsExpire(t *testing.T) {
 	}
 	_ = response.Body.Close()
 	assertStatus(t, response, http.StatusOK)
-	if got := response.Header.Get("Cache-Control"); !strings.HasPrefix(got, "public, max-age=") || !strings.HasSuffix(got, ", must-revalidate") {
+	if got := response.Header.Get("Cache-Control"); got != "public, no-cache, must-revalidate" {
 		t.Fatalf("Cache-Control = %q", got)
 	}
 	if got := response.Header.Get("Expires"); got == "" {
 		t.Fatal("Expires header is empty")
 	}
 
+	soon := time.Now().Add(time.Minute)
+	m.ExpiresAt = &soon
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	renewedAfter := time.Now().Add(2 * time.Hour)
+	response, err = http.Get(host.URL + "/" + slug + "/report.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	assertStatus(t, response, http.StatusOK)
+	if got := response.Header.Get("Cache-Control"); got != "public, no-cache, must-revalidate" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
+	m, err = readManifest(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.ExpiresAt == nil || m.ExpiresAt.Before(renewedAfter) || m.ExpiresAt.After(time.Now().Add(2*time.Hour)) {
+		t.Fatalf("expires_at = %v, want approximately two hours after access", m.ExpiresAt)
+	}
+
 	expiredAt := time.Now().Add(-time.Minute)
 	m.ExpiresAt = &expiredAt
-	data, err := json.Marshal(m)
+	data, err = json.Marshal(m)
 	if err != nil {
 		t.Fatal(err)
 	}

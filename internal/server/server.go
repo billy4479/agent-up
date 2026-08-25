@@ -16,7 +16,6 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -197,8 +196,13 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	maxAge := max(int64(time.Until(expiresAt)/time.Second), 0)
-	w.Header().Set("Cache-Control", "public, max-age="+strconv.FormatInt(maxAge, 10)+", must-revalidate")
+	expiresAt = time.Now().Add(s.uploadTTL)
+	m.ExpiresAt = &expiresAt
+	if err := writeManifest(filepath.Join(uploadDir, "manifest.json"), m); err != nil {
+		http.Error(w, "could not renew upload", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Cache-Control", "public, no-cache, must-revalidate")
 	w.Header().Set("Expires", expiresAt.UTC().Format(http.TimeFormat))
 	remainder := ""
 	if len(parts) == 2 {
@@ -356,6 +360,29 @@ func readManifest(filename string) (manifest, error) {
 	var m manifest
 	err = json.Unmarshal(data, &m)
 	return m, err
+}
+
+func writeManifest(filename string, m manifest) error {
+	data, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(filename), ".manifest-")
+	if err != nil {
+		return err
+	}
+	temporaryName := temporary.Name()
+	defer func() { _ = os.Remove(temporaryName) }()
+	if err = temporary.Chmod(0o644); err == nil {
+		_, err = temporary.Write(data)
+	}
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(temporaryName, filename)
 }
 
 func validFilename(name string) bool {

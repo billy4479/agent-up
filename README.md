@@ -17,7 +17,7 @@ Configuration:
 | `AGENTUP_LISTEN` | `:8080` | HTTP listen address |
 | `AGENTUP_DATA_DIR` | `./data` | Persistent upload directory |
 | `AGENTUP_MAX_UPLOAD_SIZE` | unlimited | Maximum request body size in bytes; must be positive when set |
-| `AGENTUP_UPLOAD_TTL` | `24h` | Upload lifetime as a positive Go duration, such as `30m` or `168h` |
+| `AGENTUP_UPLOAD_TTL` | `24h` | Upload lifetime after its most recent access, as a positive Go duration such as `30m` or `168h` |
 
 For example:
 
@@ -29,7 +29,7 @@ AGENTUP_UPLOAD_TTL=24h \
 agent-up-server
 ```
 
-Each upload is written to a temporary directory under `AGENTUP_DATA_DIR` and atomically renamed to its public slug after the body and manifest are complete. Failed and oversized uploads are removed. Expired uploads return `404 Not Found` and are deleted when requested or by a cleanup pass that runs at startup and every minute. Uploads created by older versions use the slug directory's modification time as their creation time. Keep the data directory on persistent storage and do not edit its internal layout while the server is running.
+Each upload is written to a temporary directory under `AGENTUP_DATA_DIR` and atomically renamed to its public slug after the body and manifest are complete. Failed and oversized uploads are removed. Accessing an unexpired public URL resets its lifetime. Expired uploads return `404 Not Found` and are deleted when requested or by a cleanup pass that runs at startup and every minute. Uploads created by older versions use the slug directory's modification time as their creation time. Keep the data directory on persistent storage and do not edit its internal layout while the server is running.
 
 ## CLI
 
